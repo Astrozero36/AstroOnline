@@ -1,0 +1,17 @@
+# Server (C# / .NET)
+server/**/bin/
+server/**/obj/
+
+# Unity Client
+client/**/Library/
+client/**/Temp/
+client/**/Obj/
+client/**/Build/
+client/**/Logs/
+client/**/UserSettings/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
