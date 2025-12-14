@@ -62,6 +62,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Assets\Scripts\Net\NetClient.cs" />
+    <Compile Include="Assets\Scripts\Net\ConnectionState.cs" />
     <Compile Include="Assets\Scripts\Net\UdpClientConnect.cs" />
     <Compile Include="Assets\Scripts\Net\NetSnapshot.cs" />
     <Compile Include="Assets\Scripts\Net\NetClientConfig.cs" />

@@ -23,9 +23,20 @@ public sealed class NetClient : IDisposable
     public ulong ClientId { get; private set; }
     public int LastRttMs { get; private set; }
 
+    public ConnectionState State { get; private set; } = ConnectionState.Stopped;
+
+    // Last reject info (valid after a REJECT)
+    public RejectReason LastRejectReason { get; private set; } = RejectReason.Unknown;
+    public byte LastRejectExpectedVersion { get; private set; }
+    public byte LastRejectGotVersion { get; private set; }
+
+    // Raised from background threads. In Unity, consume via polling or marshal to main thread yourself.
+    public event Action<ConnectionState>? OnStateChanged;
+    public event Action<RejectReason, byte, byte>? OnRejected;
+
     private readonly NetClientConfig _config;
     private readonly UdpClient _udp;
-    private CancellationTokenSource _cts;
+    private CancellationTokenSource? _cts;
 
     private readonly ConcurrentQueue<NetSnapshot> _snapshots = new();
 
@@ -48,6 +59,8 @@ public sealed class NetClient : IDisposable
             throw new InvalidOperationException("NetClient already started.");
 
         _cts = new CancellationTokenSource();
+
+        SetState(ConnectionState.Connecting);
 
         Task.Run(() => ReceiveLoopAsync(_cts.Token));
         Task.Run(() => RunHandshakeAndPingLoopAsync(_cts.Token));
@@ -91,16 +104,23 @@ public sealed class NetClient : IDisposable
         {
             while (!token.IsCancellationRequested)
             {
+                // If connected and we got a forced reconnect request, drop state and re-enter connect loop.
                 if (IsConnected && Interlocked.Exchange(ref _forceReconnectRequested, 0) != 0)
                 {
                     IsConnected = false;
                     ClientId = 0;
+                    SetState(ConnectionState.Reconnecting);
                 }
 
+                // Connect loop
                 while (!token.IsCancellationRequested && !IsConnected)
                 {
+                    if (State == ConnectionState.Stopped)
+                        SetState(ConnectionState.Connecting);
+                    else if (State != ConnectionState.Reconnecting)
+                        SetState(ConnectionState.Reconnecting);
+
                     int delayMs = CalculateBackoffDelayMs();
-                    Console.WriteLine($"NET: reconnect attempt {_retryCount + 1}, waiting {delayMs}ms");
                     await Task.Delay(delayMs, token);
 
                     byte[] connect = new byte[8];
@@ -124,11 +144,14 @@ public sealed class NetClient : IDisposable
                     _retryCount++;
                 }
 
+                // Reset backoff on success
                 if (IsConnected)
                 {
-                    _retryCount = 0; // reset backoff on success
+                    _retryCount = 0;
+                    SetState(ConnectionState.Connected);
                 }
 
+                // Connected loop
                 while (!token.IsCancellationRequested && IsConnected)
                 {
                     await SendPingAsync();
@@ -138,6 +161,7 @@ public sealed class NetClient : IDisposable
                     {
                         IsConnected = false;
                         ClientId = 0;
+                        SetState(ConnectionState.Reconnecting);
                         break;
                     }
                 }
@@ -146,11 +170,17 @@ public sealed class NetClient : IDisposable
         catch (OperationCanceledException) { }
         catch (ObjectDisposedException) { }
         catch (SocketException) { }
+        finally
+        {
+            IsConnected = false;
+            ClientId = 0;
+            SetState(ConnectionState.Stopped);
+        }
     }
 
     private int CalculateBackoffDelayMs()
     {
-        int exp = Math.Min(_retryCount, 5); // caps at 2^5 = 32
+        int exp = Math.Min(_retryCount, 5); // 1s,2s,4s,8s,16s,32s cap then hard-cap below
         int delay = InitialRetryDelayMs * (1 << exp);
         return Math.Min(delay, MaxRetryDelayMs);
     }
@@ -192,17 +222,32 @@ public sealed class NetClient : IDisposable
                 if (buf.Length != 8 + payloadLen)
                     continue;
 
+                // REJECT (12) payloadLen=3: reason(u8), expectedVersion(u8), gotVersion(u8)
+                // Process regardless of header.version so we can recover from mismatches.
                 if (type == TypeReject && payloadLen == 3)
                 {
+                    var reason = (RejectReason)buf[8];
+                    byte expected = buf[9];
+                    byte got = buf[10];
+
+                    LastRejectReason = reason;
+                    LastRejectExpectedVersion = expected;
+                    LastRejectGotVersion = got;
+
+                    OnRejected?.Invoke(reason, expected, got);
+
                     IsConnected = false;
                     ClientId = 0;
                     Interlocked.Exchange(ref _forceReconnectRequested, 1);
+                    SetState(ConnectionState.Reconnecting);
                     continue;
                 }
 
+                // For all other packets, enforce that they match our current protocol.
                 if (version != CurrentVersion)
                     continue;
 
+                // ACCEPT (11) payloadLen=8
                 if (type == TypeAccept && payloadLen == 8)
                 {
                     ClientId =
@@ -217,9 +262,11 @@ public sealed class NetClient : IDisposable
 
                     IsConnected = true;
                     _retryCount = 0;
+                    SetState(ConnectionState.Connected);
                     continue;
                 }
 
+                // PONG (2) payloadLen=4
                 if (type == TypePong && payloadLen == 4)
                 {
                     uint echoMs = (uint)(buf[8] | (buf[9] << 8) | (buf[10] << 16) | (buf[11] << 24));
@@ -228,6 +275,7 @@ public sealed class NetClient : IDisposable
                     continue;
                 }
 
+                // SNAPSHOT (20) payloadLen=32
                 if (type == TypeSnapshot && payloadLen == 32)
                 {
                     ulong tick =
@@ -276,7 +324,17 @@ public sealed class NetClient : IDisposable
         finally
         {
             IsConnected = false;
+            ClientId = 0;
         }
+    }
+
+    private void SetState(ConnectionState state)
+    {
+        if (State == state)
+            return;
+
+        State = state;
+        OnStateChanged?.Invoke(state);
     }
 
     private static void WriteHeader(byte[] packet, byte version, byte type, uint payloadLen)
