@@ -8,7 +8,9 @@ public sealed class NetClient : IDisposable
 {
     private const byte Magic0 = 0xA0;
     private const byte Magic1 = 0x01;
-    private const byte CurrentVersion = 0x02;
+
+    // v0.042: restore production protocol version (mismatch tests should be temporary edits only)
+    private const byte CurrentVersion = 0x01;
 
     // Packet types
     private const byte TypePing = 0x01;
@@ -29,6 +31,43 @@ public sealed class NetClient : IDisposable
     public RejectReason LastRejectReason { get; private set; } = RejectReason.Unknown;
     public byte LastRejectExpectedVersion { get; private set; }
     public byte LastRejectGotVersion { get; private set; }
+
+    // v0.042: centralized UI/presentation status
+    public bool IsTerminal => State == ConnectionState.UpdateRequired;
+
+    public string StatusText
+    {
+        get
+        {
+            // Snapshot local copies (avoid partial reads across threads)
+            var state = State;
+            var isConnected = IsConnected;
+            var reason = LastRejectReason;
+            byte exp = LastRejectExpectedVersion;
+            byte got = LastRejectGotVersion;
+
+            if (state == ConnectionState.UpdateRequired || reason == RejectReason.ProtocolVersionMismatch)
+                return $"Client out of date (expected={exp}, got={got}). Update required.";
+
+            if (state == ConnectionState.Reconnecting)
+            {
+                if (reason == RejectReason.ServerFull)
+                    return "Server full. Retrying…";
+                return "Reconnecting…";
+            }
+
+            if (state == ConnectionState.Connecting)
+                return "Connecting…";
+
+            if (state == ConnectionState.Connected && isConnected)
+                return "Connected.";
+
+            if (state == ConnectionState.Stopped)
+                return "Stopped.";
+
+            return state.ToString();
+        }
+    }
 
     // Raised from background threads. In Unity, consume via polling or marshal to main thread yourself.
     public event Action<ConnectionState>? OnStateChanged;
@@ -347,12 +386,13 @@ public sealed class NetClient : IDisposable
                         (buf[38] << 16) |
                         (buf[39] << 24));
 
+                    // v0.042: fix Z being incorrectly set to Y
                     _snapshots.Enqueue(new NetSnapshot(
                         tick,
                         cid,
                         BitConverter.Int32BitsToSingle(xi),
                         BitConverter.Int32BitsToSingle(yi),
-                        BitConverter.Int32BitsToSingle(yi),
+                        BitConverter.Int32BitsToSingle(zi),
                         ack
                     ));
                 }
