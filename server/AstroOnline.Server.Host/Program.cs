@@ -1,6 +1,5 @@
 ﻿﻿using System.Diagnostics;
 using System.Buffers.Binary;
-using Microsoft.Extensions.Logging.Abstractions;
 using AstroOnline.Server.Core.Commands;
 using AstroOnline.Server.Core.World;
 using AstroOnline.Server.Net.Net;
@@ -89,21 +88,22 @@ internal static class Program
             {
                 var bytes = datagram.Payload;
 
-                // Parse without enforcing version so we can explicitly reject CONNECT on mismatch.
+                // Relaxed parse: lets us explicitly reject CONNECT on version mismatch.
                 if (!PacketHeader.TryParseRelaxed(bytes, out var header))
                     continue;
 
-                // Hard protocol version enforcement: if a client is on the wrong version,
-                // reply with REJECT (12) so the client can force a reconnect.
+                // Hard protocol version enforcement.
                 if (header.Version != PacketHeader.CurrentVersion)
                 {
-                    // Only respond to CONNECT; everything else is dropped.
+                    // Only respond to CONNECT; everything else is dropped silently.
                     if (header.Type == 10 && header.PayloadLength == 0)
                     {
-                        // REJECT (12) payloadLen=2: expectedVersion(u8), gotVersion(u8)
-                        var rejectPayload = new byte[2];
-                        rejectPayload[0] = PacketHeader.CurrentVersion;
-                        rejectPayload[1] = header.Version;
+                        // REJECT (12) payloadLen=3:
+                        // reason(u8), expectedVersion(u8), gotVersion(u8)
+                        var rejectPayload = new byte[3];
+                        rejectPayload[0] = (byte)RejectReason.ProtocolVersionMismatch;
+                        rejectPayload[1] = PacketHeader.CurrentVersion;
+                        rejectPayload[2] = header.Version;
 
                         var reject = PacketBuilder.Build(12, rejectPayload);
                         await netServer.SendAsync(datagram.RemoteEndPoint, reject, token);
@@ -111,8 +111,6 @@ internal static class Program
 
                     continue;
                 }
-
-                // From here on, version matches; keep validating length/magic already done above.
 
                 // CONNECT (10)
                 if (header.Type == 10)

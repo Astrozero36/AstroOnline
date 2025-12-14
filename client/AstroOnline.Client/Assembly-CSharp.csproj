@@ -65,6 +65,7 @@
     <Compile Include="Assets\Scripts\Net\UdpClientConnect.cs" />
     <Compile Include="Assets\Scripts\Net\NetSnapshot.cs" />
     <Compile Include="Assets\Scripts\Net\NetClientConfig.cs" />
+    <Compile Include="Assets\Scripts\Net\RejectReason.cs" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="UnityEngine">

@@ -79,7 +79,6 @@ public sealed class NetClient : IDisposable
         pkt[18] = (byte)((zi >> 16) & 0xFF);
         pkt[19] = (byte)((zi >> 24) & 0xFF);
 
-        // Fire-and-forget; UDP send is non-blocking enough for this prototype
         _ = _udp.SendAsync(pkt, pkt.Length, _config.ServerIp, _config.ServerPort);
     }
 
@@ -87,52 +86,40 @@ public sealed class NetClient : IDisposable
     {
         try
         {
-            // CONNECT/RECONNECT loop
-            // - send CONNECT periodically until ACCEPT received
-            // - if REJECT/version-mismatch received, force reconnect (resend CONNECT)
             while (!token.IsCancellationRequested)
             {
-                // If we were connected and the server asked us to reconnect, drop state.
                 if (IsConnected && Interlocked.Exchange(ref _forceReconnectRequested, 0) != 0)
                 {
                     IsConnected = false;
                     ClientId = 0;
                 }
 
-                // Not connected: attempt handshake.
                 while (!token.IsCancellationRequested && !IsConnected)
                 {
-                    // CONNECT (Type=10) payloadLen=0
                     byte[] connect = new byte[8];
                     WriteHeader(connect, CurrentVersion, TypeConnect, 0);
 
                     await _udp.SendAsync(connect, connect.Length, _config.ServerIp, _config.ServerPort);
 
-                    // Wait a short window for ACCEPT/REJECT.
-                    // If REJECT arrives, ReceiveLoop will flip _forceReconnectRequested and we'll retry.
                     int waitedMs = 0;
                     const int stepMs = 25;
                     const int attemptWindowMs = 750;
+
                     while (!token.IsCancellationRequested && !IsConnected && waitedMs < attemptWindowMs)
                     {
                         if (Interlocked.Exchange(ref _forceReconnectRequested, 0) != 0)
-                        {
-                            // Immediate retry.
                             break;
-                        }
 
                         await Task.Delay(stepMs, token);
                         waitedMs += stepMs;
                     }
                 }
 
-                // Connected: ping cadence only (input is sent by Unity main thread)
                 while (!token.IsCancellationRequested && IsConnected)
                 {
                     await SendPingAsync();
                     await Task.Delay(_config.PingIntervalMs, token);
 
-                    // If REJECT arrives while connected, drop and re-handshake.
                     if (Interlocked.Exchange(ref _forceReconnectRequested, 0) != 0)
                     {
                         IsConnected = false;
@@ -184,21 +171,20 @@ public sealed class NetClient : IDisposable
                 if (buf.Length != 8 + payloadLen)
                     continue;
 
-                // REJECT (12) payloadLen=2: expectedVersion(u8), gotVersion(u8)
-                // This is intentionally processed even if header.version != CurrentVersion.
-                if (type == TypeReject && payloadLen == 2)
+                // REJECT (12) payloadLen=3:
+                // reason(u8), expectedVersion(u8), gotVersion(u8)
+                // Intentionally processed even if header.version != CurrentVersion.
+                if (type == TypeReject && payloadLen == 3)
                 {
-                    byte expected = buf[8];
-                    byte got = buf[9];
+                    var reason = (RejectReason)buf[8];
+                    byte expected = buf[9];
+                    byte got = buf[10];
 
-                    // Force reconnect loop; this lets us recover cleanly after a protocol bump.
                     IsConnected = false;
                     ClientId = 0;
                     Interlocked.Exchange(ref _forceReconnectRequested, 1);
 
-                    // Optional: expose mismatch info via console for debugging.
-                    // (Unity will show this in the Console because NetClient runs on background threads.)
-                    Console.WriteLine($"NET: REJECT version mismatch got={got} expected={expected}");
+                    Console.WriteLine($"NET: REJECT reason={reason} got={got} expected={expected}");
                     continue;
                 }
 
@@ -206,7 +192,6 @@ public sealed class NetClient : IDisposable
                 if (version != CurrentVersion)
                     continue;
 
-                // ACCEPT (11) payloadLen=8
                 if (type == TypeAccept && payloadLen == 8)
                 {
                     ClientId =
@@ -223,7 +208,6 @@ public sealed class NetClient : IDisposable
                     continue;
                 }
 
-                // PONG (2) payloadLen=4
                 if (type == TypePong && payloadLen == 4)
                 {
                     uint echoMs = (uint)(buf[8] | (buf[9] << 8) | (buf[10] << 16) | (buf[11] << 24));
@@ -232,7 +216,6 @@ public sealed class NetClient : IDisposable
                     continue;
                 }
 
-                // SNAPSHOT (20) payloadLen=32
                 if (type == TypeSnapshot && payloadLen == 32)
                 {
                     ulong tick =
