@@ -31,6 +31,11 @@ public sealed class NetClient : IDisposable
 
     private int _forceReconnectRequested;
 
+    // Reconnect backoff
+    private int _retryCount;
+    private const int MaxRetryDelayMs = 30_000;
+    private const int InitialRetryDelayMs = 1_000;
+
     public NetClient(NetClientConfig config)
     {
         _config = config;
@@ -51,7 +56,6 @@ public sealed class NetClient : IDisposable
     public bool TryDequeueSnapshot(out NetSnapshot snapshot)
         => _snapshots.TryDequeue(out snapshot);
 
-    // Called from Unity main thread at a fixed rate (20 Hz)
     public void SendInput(uint seq, float inputX, float inputZ)
     {
         if (!IsConnected)
@@ -60,8 +64,7 @@ public sealed class NetClient : IDisposable
         int xi = BitConverter.SingleToInt32Bits(inputX);
         int zi = BitConverter.SingleToInt32Bits(inputZ);
 
-        // INPUT (31) payloadLen=12: seq(u32), inputX(f32), inputZ(f32)
-        byte[] pkt = new byte[20]; // header(8) + payload(12)
+        byte[] pkt = new byte[20];
         WriteHeader(pkt, CurrentVersion, TypeInput, 12);
 
         pkt[8] = (byte)(seq & 0xFF);
@@ -96,6 +99,10 @@ public sealed class NetClient : IDisposable
 
                 while (!token.IsCancellationRequested && !IsConnected)
                 {
+                    int delayMs = CalculateBackoffDelayMs();
+                    Console.WriteLine($"NET: reconnect attempt {_retryCount + 1}, waiting {delayMs}ms");
+                    await Task.Delay(delayMs, token);
+
                     byte[] connect = new byte[8];
                     WriteHeader(connect, CurrentVersion, TypeConnect, 0);
 
@@ -113,6 +120,13 @@ public sealed class NetClient : IDisposable
                         await Task.Delay(stepMs, token);
                         waitedMs += stepMs;
                     }
+
+                    _retryCount++;
+                }
+
+                if (IsConnected)
+                {
+                    _retryCount = 0; // reset backoff on success
                 }
 
                 while (!token.IsCancellationRequested && IsConnected)
@@ -132,6 +146,13 @@ public sealed class NetClient : IDisposable
         catch (OperationCanceledException) { }
         catch (ObjectDisposedException) { }
         catch (SocketException) { }
+    }
+
+    private int CalculateBackoffDelayMs()
+    {
+        int exp = Math.Min(_retryCount, 5); // caps at 2^5 = 32
+        int delay = InitialRetryDelayMs * (1 << exp);
+        return Math.Min(delay, MaxRetryDelayMs);
     }
 
     private async Task SendPingAsync()
@@ -171,24 +192,14 @@ public sealed class NetClient : IDisposable
                 if (buf.Length != 8 + payloadLen)
                     continue;
 
-                // REJECT (12) payloadLen=3:
-                // reason(u8), expectedVersion(u8), gotVersion(u8)
-                // Intentionally processed even if header.version != CurrentVersion.
                 if (type == TypeReject && payloadLen == 3)
                 {
-                    var reason = (RejectReason)buf[8];
-                    byte expected = buf[9];
-                    byte got = buf[10];
-
                     IsConnected = false;
                     ClientId = 0;
                     Interlocked.Exchange(ref _forceReconnectRequested, 1);
-
-                    Console.WriteLine($"NET: REJECT reason={reason} got={got} expected={expected}");
                     continue;
                 }
 
-                // For all other packets, enforce that they match our current protocol.
                 if (version != CurrentVersion)
                     continue;
 
@@ -205,6 +216,7 @@ public sealed class NetClient : IDisposable
                         ((ulong)buf[15] << 56);
 
                     IsConnected = true;
+                    _retryCount = 0;
                     continue;
                 }
 
