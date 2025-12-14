@@ -13,3 +13,6 @@
 [Bb]uilds/
 [Ll]ogs/
 [Uu]ser[Ss]ettings/
+# .NET build outputs
+**/bin/
+**/obj/
