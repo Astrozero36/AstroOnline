@@ -4,4 +4,5 @@ public enum ConnectionState : byte
     Connecting = 1,
     Connected = 2,
     Reconnecting = 3,
+    UpdateRequired = 4,
 }

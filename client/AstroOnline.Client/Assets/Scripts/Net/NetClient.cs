@@ -42,6 +42,9 @@ public sealed class NetClient : IDisposable
 
     private int _forceReconnectRequested;
 
+    // Terminal stop (e.g. protocol mismatch). When set, the client will not attempt reconnects.
+    private int _terminalStopRequested;
+
     // Reconnect backoff
     private int _retryCount;
     private const int MaxRetryDelayMs = 30_000;
@@ -104,6 +107,16 @@ public sealed class NetClient : IDisposable
         {
             while (!token.IsCancellationRequested)
             {
+                // Terminal state: do not attempt any further reconnects or pings.
+                if (Volatile.Read(ref _terminalStopRequested) != 0)
+                {
+                    IsConnected = false;
+                    ClientId = 0;
+                    SetState(ConnectionState.UpdateRequired);
+                    await Task.Delay(250, token);
+                    continue;
+                }
+
                 // If connected and we got a forced reconnect request, drop state and re-enter connect loop.
                 if (IsConnected && Interlocked.Exchange(ref _forceReconnectRequested, 0) != 0)
                 {
@@ -115,6 +128,9 @@ public sealed class NetClient : IDisposable
                 // Connect loop
                 while (!token.IsCancellationRequested && !IsConnected)
                 {
+                    if (Volatile.Read(ref _terminalStopRequested) != 0)
+                        break;
+
                     if (State == ConnectionState.Stopped)
                         SetState(ConnectionState.Connecting);
                     else if (State != ConnectionState.Reconnecting)
@@ -134,6 +150,9 @@ public sealed class NetClient : IDisposable
 
                     while (!token.IsCancellationRequested && !IsConnected && waitedMs < attemptWindowMs)
                     {
+                        if (Volatile.Read(ref _terminalStopRequested) != 0)
+                            break;
+
                         if (Interlocked.Exchange(ref _forceReconnectRequested, 0) != 0)
                             break;
 
@@ -154,6 +173,14 @@ public sealed class NetClient : IDisposable
                 // Connected loop
                 while (!token.IsCancellationRequested && IsConnected)
                 {
+                    if (Volatile.Read(ref _terminalStopRequested) != 0)
+                    {
+                        IsConnected = false;
+                        ClientId = 0;
+                        SetState(ConnectionState.UpdateRequired);
+                        break;
+                    }
+
                     await SendPingAsync();
                     await Task.Delay(_config.PingIntervalMs, token);
 
@@ -238,8 +265,20 @@ public sealed class NetClient : IDisposable
 
                     IsConnected = false;
                     ClientId = 0;
-                    Interlocked.Exchange(ref _forceReconnectRequested, 1);
-                    SetState(ConnectionState.Reconnecting);
+
+                    // Protocol mismatch is terminal: stop reconnect attempts and enter UpdateRequired.
+                    if (reason == RejectReason.ProtocolVersionMismatch)
+                    {
+                        Interlocked.Exchange(ref _terminalStopRequested, 1);
+                        Interlocked.Exchange(ref _forceReconnectRequested, 0);
+                        SetState(ConnectionState.UpdateRequired);
+                    }
+                    else
+                    {
+                        // ServerFull (and any other rejects for now) remain recoverable.
+                        Interlocked.Exchange(ref _forceReconnectRequested, 1);
+                        SetState(ConnectionState.Reconnecting);
+                    }
                     continue;
                 }
 
@@ -313,7 +352,7 @@ public sealed class NetClient : IDisposable
                         cid,
                         BitConverter.Int32BitsToSingle(xi),
                         BitConverter.Int32BitsToSingle(yi),
-                        BitConverter.Int32BitsToSingle(zi),
+                        BitConverter.Int32BitsToSingle(yi),
                         ack
                     ));
                 }
