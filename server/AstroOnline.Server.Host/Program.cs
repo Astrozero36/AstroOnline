@@ -1,4 +1,4 @@
-﻿﻿using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Buffers.Binary;
 using AstroOnline.Server.Core.Commands;
 using AstroOnline.Server.Core.World;
@@ -48,13 +48,14 @@ internal static class Program
         const int tickRate = 20;
         const int snapshotEveryTicks = 1;
 
-        // Eviction policy
-        const int evictCheckEveryTicks = 20;      // 1s @ 20Hz
-        const long staleTimeoutMs = 15_000;       // 15 seconds without any packet
+        // Capacity + eviction
+        const int maxClients = 64;
+        const int evictCheckEveryTicks = 20; // 1s @ 20Hz
+        const long staleTimeoutMs = 15_000;
 
         var tickInterval = TimeSpan.FromMilliseconds(1000.0 / tickRate);
 
-        Console.WriteLine($"Server starting. TickRate={tickRate}Hz.");
+        Console.WriteLine($"Server starting. TickRate={tickRate}Hz. MaxClients={maxClients}");
 
         var world = new ServerWorld();
         var clients = new ClientRegistry();
@@ -92,18 +93,15 @@ internal static class Program
             {
                 var bytes = datagram.Payload;
 
-                // Relaxed parse: lets us explicitly reject CONNECT on version mismatch.
+                // Relaxed parse so we can reply to CONNECT on mismatch.
                 if (!PacketHeader.TryParseRelaxed(bytes, out var header))
                     continue;
 
-                // Hard protocol version enforcement.
+                // Protocol version enforcement
                 if (header.Version != PacketHeader.CurrentVersion)
                 {
-                    // Only respond to CONNECT; everything else is dropped silently.
                     if (header.Type == 10 && header.PayloadLength == 0)
                     {
-                        // REJECT (12) payloadLen=3:
-                        // reason(u8), expectedVersion(u8), gotVersion(u8)
                         var rejectPayload = new byte[3];
                         rejectPayload[0] = (byte)RejectReason.ProtocolVersionMismatch;
                         rejectPayload[1] = PacketHeader.CurrentVersion;
@@ -112,7 +110,6 @@ internal static class Program
                         var reject = PacketBuilder.Build(12, rejectPayload);
                         await netServer.SendAsync(datagram.RemoteEndPoint, reject, token);
                     }
-
                     continue;
                 }
 
@@ -123,6 +120,20 @@ internal static class Program
                 {
                     if (header.PayloadLength != 0)
                         continue;
+
+                    // Enforce max clients
+                    if (clients.Count >= maxClients && !clients.Contains(datagram.RemoteEndPoint))
+                    {
+                        // REJECT: ServerFull
+                        var rejectPayload = new byte[3];
+                        rejectPayload[0] = (byte)RejectReason.ServerFull;
+                        rejectPayload[1] = PacketHeader.CurrentVersion;
+                        rejectPayload[2] = PacketHeader.CurrentVersion;
+
+                        var reject = PacketBuilder.Build(12, rejectPayload);
+                        await netServer.SendAsync(datagram.RemoteEndPoint, reject, token);
+                        continue;
+                    }
 
                     var info = clients.GetOrAdd(datagram.RemoteEndPoint);
                     info.LastSeenUnixMs = nowUnixMs;
@@ -141,7 +152,6 @@ internal static class Program
                     if (header.PayloadLength != 4)
                         continue;
 
-                    // Touch if we already know this endpoint.
                     clients.Touch(datagram.RemoteEndPoint, nowUnixMs);
 
                     uint clientTimeMs = BinaryPrimitives.ReadUInt32LittleEndian(
@@ -158,7 +168,7 @@ internal static class Program
                     continue;
                 }
 
-                // INPUT (31) payloadLen=12: u32 seq, f32 inputX, f32 inputZ
+                // INPUT (31)
                 if (header.Type == 31)
                 {
                     if (header.PayloadLength != 12)
@@ -178,13 +188,12 @@ internal static class Program
                     float inputZ = BitConverter.Int32BitsToSingle(izi);
 
                     world.Enqueue(new InputCommand(info.ClientId, seq, inputX, inputZ));
-                    continue;
                 }
             }
 
             world.Update();
 
-            // Evict stale clients periodically.
+            // Evict stale clients
             if (tick % evictCheckEveryTicks == 0)
             {
                 var nowUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -193,6 +202,7 @@ internal static class Program
                     Console.WriteLine($"Evicted stale clients: {removed}");
             }
 
+            // Snapshots
             if (tick % snapshotEveryTicks == 0)
             {
                 foreach (var c in clients.SnapshotAll())

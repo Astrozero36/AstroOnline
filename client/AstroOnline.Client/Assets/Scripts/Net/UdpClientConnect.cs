@@ -15,7 +15,7 @@ public sealed class UdpClientConnect : MonoBehaviour
     private readonly Dictionary<ulong, List<NetSnapshot>> _historyByClient = new();
     private readonly Dictionary<ulong, GameObject> _entityByClient = new();
 
-    // Prediction: keyed by input seq (NOT tick)
+    // Prediction
     private uint _localSeq;
     private uint _lastAckSeq;
     private bool _hasAckBase;
@@ -38,9 +38,24 @@ public sealed class UdpClientConnect : MonoBehaviour
         };
 
         _client = new NetClient(config);
+
+        // Subscribe so rejects/state are visible in Unity console.
+        _client.OnStateChanged += OnNetStateChanged;
+        _client.OnRejected += OnNetRejected;
+
         _client.Start();
 
         _nextStatusLogTime = Time.time + 1f;
+    }
+
+    private void OnNetStateChanged(ConnectionState state)
+    {
+        Debug.Log($"NET STATE: {state}");
+    }
+
+    private void OnNetRejected(RejectReason reason, byte expected, byte got)
+    {
+        Debug.LogWarning($"NET REJECT: reason={reason} expectedVersion={expected} gotVersion={got}");
     }
 
     private void Update()
@@ -51,7 +66,7 @@ public sealed class UdpClientConnect : MonoBehaviour
         if (Time.time >= _nextStatusLogTime)
         {
             _nextStatusLogTime = Time.time + 1f;
-            Debug.Log($"Net status: connected={_client.IsConnected} clientId={_client.ClientId} rtt={_client.LastRttMs}ms seq={_localSeq} ack={_lastAckSeq}");
+            Debug.Log($"Net status: state={_client.State} connected={_client.IsConnected} clientId={_client.ClientId} rtt={_client.LastRttMs}ms seq={_localSeq} ack={_lastAckSeq}");
         }
 
         // Drain snapshots
@@ -299,7 +314,12 @@ public sealed class UdpClientConnect : MonoBehaviour
 
     private void OnDestroy()
     {
-        _client?.Dispose();
+        if (_client != null)
+        {
+            _client.OnStateChanged -= OnNetStateChanged;
+            _client.OnRejected -= OnNetRejected;
+            _client.Dispose();
+        }
 
         foreach (var kv in _entityByClient)
         {

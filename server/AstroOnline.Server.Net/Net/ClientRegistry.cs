@@ -8,16 +8,20 @@ public sealed class ClientRegistry
     private long _nextId = 0;
     private readonly ConcurrentDictionary<IPEndPoint, ClientInfo> _byEndPoint = new();
 
+    public int Count => _byEndPoint.Count;
+
+    public bool Contains(IPEndPoint ep)
+        => _byEndPoint.ContainsKey(ep);
+
     public ClientInfo GetOrAdd(IPEndPoint ep)
     {
         return _byEndPoint.GetOrAdd(ep, e =>
         {
             var id = (ulong)Interlocked.Increment(ref _nextId);
-            var ci = new ClientInfo(e, id)
+            return new ClientInfo(e, id)
             {
                 LastSeenUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
             };
-            return ci;
         });
     }
 
@@ -30,21 +34,13 @@ public sealed class ClientRegistry
             info.LastSeenUnixMs = nowUnixMs;
     }
 
-    public bool TryRemove(IPEndPoint ep, out ClientInfo info)
-        => _byEndPoint.TryRemove(ep, out info!);
-
-    /// <summary>
-    /// Removes all clients where (now - lastSeen) >= timeoutMs.
-    /// Returns number removed.
-    /// </summary>
     public int EvictStale(long nowUnixMs, long timeoutMs)
     {
         int removed = 0;
 
         foreach (var kv in _byEndPoint)
         {
-            var info = kv.Value;
-            if (nowUnixMs - info.LastSeenUnixMs >= timeoutMs)
+            if (nowUnixMs - kv.Value.LastSeenUnixMs >= timeoutMs)
             {
                 if (_byEndPoint.TryRemove(kv.Key, out _))
                     removed++;
@@ -54,7 +50,6 @@ public sealed class ClientRegistry
         return removed;
     }
 
-    // Host uses this to broadcast snapshots.
     public ClientInfo[] SnapshotAll()
         => _byEndPoint.Values.ToArray();
 
