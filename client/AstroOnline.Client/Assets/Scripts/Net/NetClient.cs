@@ -6,6 +6,19 @@ using System.Threading.Tasks;
 
 public sealed class NetClient : IDisposable
 {
+    private const byte Magic0 = 0xA0;
+    private const byte Magic1 = 0x01;
+    private const byte CurrentVersion = 0x01;
+
+    // Packet types
+    private const byte TypePing = 0x01;
+    private const byte TypePong = 0x02;
+    private const byte TypeConnect = 0x0A;
+    private const byte TypeAccept = 0x0B;
+    private const byte TypeReject = 0x0C;
+    private const byte TypeSnapshot = 0x14;
+    private const byte TypeInput = 0x1F;
+
     public bool IsConnected { get; private set; }
     public ulong ClientId { get; private set; }
     public int LastRttMs { get; private set; }
@@ -15,6 +28,8 @@ public sealed class NetClient : IDisposable
     private CancellationTokenSource _cts;
 
     private readonly ConcurrentQueue<NetSnapshot> _snapshots = new();
+
+    private int _forceReconnectRequested;
 
     public NetClient(NetClientConfig config)
     {
@@ -47,10 +62,7 @@ public sealed class NetClient : IDisposable
 
         // INPUT (31) payloadLen=12: seq(u32), inputX(f32), inputZ(f32)
         byte[] pkt = new byte[20]; // header(8) + payload(12)
-        pkt[0] = 0xA0; pkt[1] = 0x01;
-        pkt[2] = 0x01;
-        pkt[3] = 31;
-        pkt[4] = 12; pkt[5] = 0; pkt[6] = 0; pkt[7] = 0;
+        WriteHeader(pkt, CurrentVersion, TypeInput, 12);
 
         pkt[8] = (byte)(seq & 0xFF);
         pkt[9] = (byte)((seq >> 8) & 0xFF);
@@ -75,26 +87,59 @@ public sealed class NetClient : IDisposable
     {
         try
         {
-            // CONNECT (Type=10)
-            byte[] connect =
-            {
-                0xA0, 0x01,
-                0x01,
-                0x0A,
-                0x00, 0x00, 0x00, 0x00
-            };
-
-            await _udp.SendAsync(connect, connect.Length, _config.ServerIp, _config.ServerPort);
-
-            // Wait for ACCEPT
-            while (!token.IsCancellationRequested && !IsConnected)
-                await Task.Delay(10, token);
-
-            // Ping cadence only (input is sent by Unity main thread)
+            // CONNECT/RECONNECT loop
+            // - send CONNECT periodically until ACCEPT received
+            // - if REJECT/version-mismatch received, force reconnect (resend CONNECT)
             while (!token.IsCancellationRequested)
             {
-                await SendPingAsync();
-                await Task.Delay(_config.PingIntervalMs, token);
+                // If we were connected and the server asked us to reconnect, drop state.
+                if (IsConnected && Interlocked.Exchange(ref _forceReconnectRequested, 0) != 0)
+                {
+                    IsConnected = false;
+                    ClientId = 0;
+                }
+
+                // Not connected: attempt handshake.
+                while (!token.IsCancellationRequested && !IsConnected)
+                {
+                    // CONNECT (Type=10) payloadLen=0
+                    byte[] connect = new byte[8];
+                    WriteHeader(connect, CurrentVersion, TypeConnect, 0);
+
+                    await _udp.SendAsync(connect, connect.Length, _config.ServerIp, _config.ServerPort);
+
+                    // Wait a short window for ACCEPT/REJECT.
+                    // If REJECT arrives, ReceiveLoop will flip _forceReconnectRequested and we'll retry.
+                    int waitedMs = 0;
+                    const int stepMs = 25;
+                    const int attemptWindowMs = 750;
+                    while (!token.IsCancellationRequested && !IsConnected && waitedMs < attemptWindowMs)
+                    {
+                        if (Interlocked.Exchange(ref _forceReconnectRequested, 0) != 0)
+                        {
+                            // Immediate retry.
+                            break;
+                        }
+
+                        await Task.Delay(stepMs, token);
+                        waitedMs += stepMs;
+                    }
+                }
+
+                // Connected: ping cadence only (input is sent by Unity main thread)
+                while (!token.IsCancellationRequested && IsConnected)
+                {
+                    await SendPingAsync();
+                    await Task.Delay(_config.PingIntervalMs, token);
+
+                    // If REJECT arrives while connected, drop and re-handshake.
+                    if (Interlocked.Exchange(ref _forceReconnectRequested, 0) != 0)
+                    {
+                        IsConnected = false;
+                        ClientId = 0;
+                        break;
+                    }
+                }
             }
         }
         catch (OperationCanceledException) { }
@@ -107,10 +152,7 @@ public sealed class NetClient : IDisposable
         uint sendMs = (uint)Environment.TickCount;
 
         byte[] ping = new byte[12];
-        ping[0] = 0xA0; ping[1] = 0x01;
-        ping[2] = 0x01;
-        ping[3] = 0x01;
-        ping[4] = 0x04; ping[5] = 0; ping[6] = 0; ping[7] = 0;
+        WriteHeader(ping, CurrentVersion, TypePing, 4);
 
         ping[8] = (byte)(sendMs & 0xFF);
         ping[9] = (byte)((sendMs >> 8) & 0xFF);
@@ -132,17 +174,40 @@ public sealed class NetClient : IDisposable
                 if (buf.Length < 8)
                     continue;
 
-                if (buf[0] != 0xA0 || buf[1] != 0x01 || buf[2] != 0x01)
+                if (buf[0] != Magic0 || buf[1] != Magic1)
                     continue;
 
+                byte version = buf[2];
                 byte type = buf[3];
                 uint payloadLen = (uint)(buf[4] | (buf[5] << 8) | (buf[6] << 16) | (buf[7] << 24));
 
                 if (buf.Length != 8 + payloadLen)
                     continue;
 
+                // REJECT (12) payloadLen=2: expectedVersion(u8), gotVersion(u8)
+                // This is intentionally processed even if header.version != CurrentVersion.
+                if (type == TypeReject && payloadLen == 2)
+                {
+                    byte expected = buf[8];
+                    byte got = buf[9];
+
+                    // Force reconnect loop; this lets us recover cleanly after a protocol bump.
+                    IsConnected = false;
+                    ClientId = 0;
+                    Interlocked.Exchange(ref _forceReconnectRequested, 1);
+
+                    // Optional: expose mismatch info via console for debugging.
+                    // (Unity will show this in the Console because NetClient runs on background threads.)
+                    Console.WriteLine($"NET: REJECT version mismatch got={got} expected={expected}");
+                    continue;
+                }
+
+                // For all other packets, enforce that they match our current protocol.
+                if (version != CurrentVersion)
+                    continue;
+
                 // ACCEPT (11) payloadLen=8
-                if (type == 0x0B && payloadLen == 8)
+                if (type == TypeAccept && payloadLen == 8)
                 {
                     ClientId =
                         (ulong)buf[8] |
@@ -159,7 +224,7 @@ public sealed class NetClient : IDisposable
                 }
 
                 // PONG (2) payloadLen=4
-                if (type == 0x02 && payloadLen == 4)
+                if (type == TypePong && payloadLen == 4)
                 {
                     uint echoMs = (uint)(buf[8] | (buf[9] << 8) | (buf[10] << 16) | (buf[11] << 24));
                     uint nowMs = (uint)Environment.TickCount;
@@ -168,7 +233,7 @@ public sealed class NetClient : IDisposable
                 }
 
                 // SNAPSHOT (20) payloadLen=32
-                if (type == 20 && payloadLen == 32)
+                if (type == TypeSnapshot && payloadLen == 32)
                 {
                     ulong tick =
                         (ulong)buf[8] |
@@ -217,6 +282,19 @@ public sealed class NetClient : IDisposable
         {
             IsConnected = false;
         }
+    }
+
+    private static void WriteHeader(byte[] packet, byte version, byte type, uint payloadLen)
+    {
+        packet[0] = Magic0;
+        packet[1] = Magic1;
+        packet[2] = version;
+        packet[3] = type;
+
+        packet[4] = (byte)(payloadLen & 0xFF);
+        packet[5] = (byte)((payloadLen >> 8) & 0xFF);
+        packet[6] = (byte)((payloadLen >> 16) & 0xFF);
+        packet[7] = (byte)((payloadLen >> 24) & 0xFF);
     }
 
     public void Dispose()

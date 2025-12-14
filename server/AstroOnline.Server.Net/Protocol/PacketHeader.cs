@@ -23,6 +23,31 @@ public readonly record struct PacketHeader(
 
     public const byte CurrentVersion = 1;
 
+    /// <summary>
+    /// Parse header + length without enforcing protocol version.
+    /// Use this to detect version mismatches and reply (e.g. during CONNECT).
+    /// </summary>
+    public static bool TryParseRelaxed(ReadOnlySpan<byte> datagram, out PacketHeader header)
+    {
+        header = default;
+
+        if (datagram.Length < SizeBytes)
+            return false;
+
+        if (datagram[0] != Magic0 || datagram[1] != Magic1)
+            return false;
+
+        var version = datagram[2];
+        var type = datagram[3];
+        var payloadLen = BinaryPrimitives.ReadUInt32LittleEndian(datagram.Slice(4, 4));
+
+        if (datagram.Length != SizeBytes + payloadLen)
+            return false;
+
+        header = new PacketHeader(version, type, payloadLen);
+        return true;
+    }
+
     // Existing behavior (silent)
     public static bool TryParse(ReadOnlySpan<byte> datagram, out PacketHeader header)
     {

@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+﻿﻿using System.Diagnostics;
 using System.Buffers.Binary;
 using Microsoft.Extensions.Logging.Abstractions;
 using AstroOnline.Server.Core.Commands;
@@ -89,9 +89,30 @@ internal static class Program
             {
                 var bytes = datagram.Payload;
 
-                // Uses NullLogger to avoid adding packages; still validates version/length.
-                if (!PacketHeader.TryParse(bytes, NullLogger.Instance, out var header))
+                // Parse without enforcing version so we can explicitly reject CONNECT on mismatch.
+                if (!PacketHeader.TryParseRelaxed(bytes, out var header))
                     continue;
+
+                // Hard protocol version enforcement: if a client is on the wrong version,
+                // reply with REJECT (12) so the client can force a reconnect.
+                if (header.Version != PacketHeader.CurrentVersion)
+                {
+                    // Only respond to CONNECT; everything else is dropped.
+                    if (header.Type == 10 && header.PayloadLength == 0)
+                    {
+                        // REJECT (12) payloadLen=2: expectedVersion(u8), gotVersion(u8)
+                        var rejectPayload = new byte[2];
+                        rejectPayload[0] = PacketHeader.CurrentVersion;
+                        rejectPayload[1] = header.Version;
+
+                        var reject = PacketBuilder.Build(12, rejectPayload);
+                        await netServer.SendAsync(datagram.RemoteEndPoint, reject, token);
+                    }
+
+                    continue;
+                }
+
+                // From here on, version matches; keep validating length/magic already done above.
 
                 // CONNECT (10)
                 if (header.Type == 10)
