@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\AstroOnline.Server.Core\AstroOnline.Server.Core.csproj" />
+    <ProjectReference Include="..\AstroOnline.Server.Net\AstroOnline.Server.Net.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

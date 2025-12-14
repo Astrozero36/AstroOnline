@@ -9,6 +9,12 @@ public sealed class ServerWorld
 
     public WorldState State { get; } = new();
 
+    // Authoritative movement tuning (units per second)
+    private const float MoveSpeed = 2.0f;
+
+    // Fixed tick (matches host)
+    private const float TickDt = 1f / 20f;
+
     public void Enqueue(IWorldCommand command)
     {
         _inbox.Enqueue(command);
@@ -18,12 +24,33 @@ public sealed class ServerWorld
     {
         State.Tick++;
 
-        // Drain all commands for this tick (authoritative application order = arrival order for now)
+        // Apply all commands received since last tick
         while (_inbox.TryDequeue(out var cmd))
         {
             cmd.Apply(State);
         }
 
-        // TODO: simulation step after commands
+        // Authoritative simulation step: integrate movement using current input state
+        foreach (var kv in State.Players)
+        {
+            var p = kv.Value;
+
+            // Input vector is expected to be stored on PlayerState (added next step)
+            float ix = p.InputX;
+            float iz = p.InputZ;
+
+            // Clamp to unit circle (prevents faster diagonal)
+            float magSq = (ix * ix) + (iz * iz);
+            if (magSq > 1f)
+            {
+                float invMag = 1f / (float)System.Math.Sqrt(magSq);
+                ix *= invMag;
+                iz *= invMag;
+            }
+
+            p.X += ix * MoveSpeed * TickDt;
+            p.Z += iz * MoveSpeed * TickDt;
+            // p.Y stays unchanged for now
+        }
     }
 }
