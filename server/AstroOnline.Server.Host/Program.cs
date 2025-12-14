@@ -48,6 +48,10 @@ internal static class Program
         const int tickRate = 20;
         const int snapshotEveryTicks = 1;
 
+        // Eviction policy
+        const int evictCheckEveryTicks = 20;      // 1s @ 20Hz
+        const long staleTimeoutMs = 15_000;       // 15 seconds without any packet
+
         var tickInterval = TimeSpan.FromMilliseconds(1000.0 / tickRate);
 
         Console.WriteLine($"Server starting. TickRate={tickRate}Hz.");
@@ -112,6 +116,8 @@ internal static class Program
                     continue;
                 }
 
+                var nowUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
                 // CONNECT (10)
                 if (header.Type == 10)
                 {
@@ -119,7 +125,7 @@ internal static class Program
                         continue;
 
                     var info = clients.GetOrAdd(datagram.RemoteEndPoint);
-                    info.LastSeenUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    info.LastSeenUnixMs = nowUnixMs;
 
                     var idPayload = new byte[8];
                     BinaryPrimitives.WriteUInt64LittleEndian(idPayload, info.ClientId);
@@ -134,6 +140,9 @@ internal static class Program
                 {
                     if (header.PayloadLength != 4)
                         continue;
+
+                    // Touch if we already know this endpoint.
+                    clients.Touch(datagram.RemoteEndPoint, nowUnixMs);
 
                     uint clientTimeMs = BinaryPrimitives.ReadUInt32LittleEndian(
                         bytes.AsSpan(PacketHeader.SizeBytes, 4)
@@ -158,7 +167,7 @@ internal static class Program
                     if (!clients.TryGet(datagram.RemoteEndPoint, out var info))
                         continue;
 
-                    info.LastSeenUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    info.LastSeenUnixMs = nowUnixMs;
 
                     uint seq = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(8, 4));
 
@@ -174,6 +183,15 @@ internal static class Program
             }
 
             world.Update();
+
+            // Evict stale clients periodically.
+            if (tick % evictCheckEveryTicks == 0)
+            {
+                var nowUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                var removed = clients.EvictStale(nowUnixMs, staleTimeoutMs);
+                if (removed > 0)
+                    Console.WriteLine($"Evicted stale clients: {removed}");
+            }
 
             if (tick % snapshotEveryTicks == 0)
             {
