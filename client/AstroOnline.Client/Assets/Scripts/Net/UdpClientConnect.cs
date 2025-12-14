@@ -28,6 +28,10 @@ public sealed class UdpClientConnect : MonoBehaviour
     private float _accum;
     private float _nextStatusLogTime;
 
+    // Step 41: terminal stop for non-recoverable rejects (protocol mismatch)
+    private bool _terminalStop;
+    private string _terminalStopMessage;
+
     private void Start()
     {
         var config = new NetClientConfig
@@ -51,16 +55,45 @@ public sealed class UdpClientConnect : MonoBehaviour
     private void OnNetStateChanged(ConnectionState state)
     {
         Debug.Log($"NET STATE: {state}");
+
+        // Step 41: if NetClient entered terminal state, stop status spam and surface a clear message once
+        if (state == ConnectionState.UpdateRequired)
+        {
+            if (!_terminalStop)
+            {
+                _terminalStop = true;
+
+                if (string.IsNullOrEmpty(_terminalStopMessage))
+                    _terminalStopMessage = "Client out of date. Update required.";
+
+                Debug.LogError(_terminalStopMessage);
+            }
+        }
     }
 
     private void OnNetRejected(RejectReason reason, byte expected, byte got)
     {
         Debug.LogWarning($"NET REJECT: reason={reason} expectedVersion={expected} gotVersion={got}");
+
+        // Step 41: Protocol mismatch is terminal (must not reconnect)
+        if (reason == RejectReason.ProtocolVersionMismatch)
+        {
+            if (!_terminalStop)
+            {
+                _terminalStop = true;
+                _terminalStopMessage = $"Client out of date (expectedVersion={expected}, gotVersion={got}). Update required.";
+                Debug.LogError(_terminalStopMessage);
+            }
+        }
     }
 
     private void Update()
     {
         if (_client == null)
+            return;
+
+        // Step 41: stop spammy status logs and gameplay updates once terminal
+        if (_terminalStop)
             return;
 
         if (Time.time >= _nextStatusLogTime)

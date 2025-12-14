@@ -8,7 +8,7 @@ public sealed class NetClient : IDisposable
 {
     private const byte Magic0 = 0xA0;
     private const byte Magic1 = 0x01;
-    private const byte CurrentVersion = 0x01;
+    private const byte CurrentVersion = 0x02;
 
     // Packet types
     private const byte TypePing = 0x01;
