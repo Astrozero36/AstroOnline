@@ -17,6 +17,9 @@ public sealed class UdpClientConnect : MonoBehaviour
     // Reconciliation tolerance (units). Below this, do not rebuild prediction.
     private const float ReconcileEpsilon = 0.02f;
 
+    // Time-based interpolation back-time (ms). Using 3 ticks worth by default.
+    private static readonly uint InterpBackTimeMs = (uint)Mathf.RoundToInt(InterpDelayTicks * TickDt * 1000f);
+
     private readonly Dictionary<ulong, List<NetSnapshot>> _historyByClient = new();
     private readonly Dictionary<ulong, GameObject> _entityByClient = new();
 
@@ -203,14 +206,11 @@ public sealed class UdpClientConnect : MonoBehaviour
             }
             else
             {
-                if (!TryGetInterpolated(hist, out _, out var x, out var y, out var z))
+                if (!TryGetInterpolated(hist, out pos))
                     continue;
 
-                pos = new Vector3(x, y, z);
-
                 var last = hist[hist.Count - 1];
-                float err = Vector3.Distance(
-                    new Vector3(last.X, last.Y, last.Z), pos);
+                float err = Vector3.Distance(new Vector3(last.X, last.Y, last.Z), pos);
                 _interpErrorAccum += err;
                 _interpErrorSamples++;
             }
@@ -227,13 +227,117 @@ public sealed class UdpClientConnect : MonoBehaviour
             if (hist.Count == 0)
                 continue;
 
-            if (!TryGetInterpolated(hist, out _, out var x, out var y, out var z))
+            if (!TryGetInterpolated(hist, out var pos))
                 continue;
 
-            GetOrCreateEntity(kv.Key).transform.position =
-                new Vector3(x, y, z);
+            GetOrCreateEntity(kv.Key).transform.position = pos;
         }
     }
+
+    private static bool TryGetInterpolated(List<NetSnapshot> hist, out Vector3 pos)
+    {
+        var latest = hist[hist.Count - 1];
+
+        // Prefer time-based interpolation if serverTimeMs is present.
+        if (latest.ServerTimeMs != 0 && hist[0].ServerTimeMs != 0)
+        {
+            uint renderTimeMs = unchecked(latest.ServerTimeMs - InterpBackTimeMs);
+
+            // Clamp to ends
+            if (TimeLessOrEqual(renderTimeMs, hist[0].ServerTimeMs))
+            {
+                pos = new Vector3(hist[0].X, hist[0].Y, hist[0].Z);
+                return true;
+            }
+
+            if (TimeGreaterOrEqual(renderTimeMs, latest.ServerTimeMs))
+            {
+                pos = new Vector3(latest.X, latest.Y, latest.Z);
+                return true;
+            }
+
+            NetSnapshot a = hist[0];
+            NetSnapshot b = latest;
+
+            for (int i = 0; i < hist.Count - 1; i++)
+            {
+                var s0 = hist[i];
+                var s1 = hist[i + 1];
+                if (TimeLessOrEqual(s0.ServerTimeMs, renderTimeMs) && TimeLessOrEqual(renderTimeMs, s1.ServerTimeMs))
+                {
+                    a = s0;
+                    b = s1;
+                    break;
+                }
+            }
+
+            uint dt = unchecked(b.ServerTimeMs - a.ServerTimeMs);
+            if (dt == 0)
+            {
+                pos = new Vector3(a.X, a.Y, a.Z);
+                return true;
+            }
+
+            float alpha = (float)unchecked(renderTimeMs - a.ServerTimeMs) / (float)dt;
+
+            pos = new Vector3(
+                Mathf.LerpUnclamped(a.X, b.X, alpha),
+                Mathf.LerpUnclamped(a.Y, b.Y, alpha),
+                Mathf.LerpUnclamped(a.Z, b.Z, alpha)
+            );
+            return true;
+        }
+
+        // Fallback: old tick-based interpolation.
+        ulong renderTick = latest.ServerTick > InterpDelayTicks ? (latest.ServerTick - InterpDelayTicks) : 0;
+
+        if (renderTick <= hist[0].ServerTick)
+        {
+            pos = new Vector3(hist[0].X, hist[0].Y, hist[0].Z);
+            return true;
+        }
+
+        if (renderTick >= latest.ServerTick)
+        {
+            pos = new Vector3(latest.X, latest.Y, latest.Z);
+            return true;
+        }
+
+        NetSnapshot ta = hist[0];
+        NetSnapshot tb = latest;
+
+        for (int i = 0; i < hist.Count - 1; i++)
+        {
+            var s0 = hist[i];
+            var s1 = hist[i + 1];
+            if (s0.ServerTick <= renderTick && renderTick <= s1.ServerTick)
+            {
+                ta = s0;
+                tb = s1;
+                break;
+            }
+        }
+
+        ulong tdt = tb.ServerTick - ta.ServerTick;
+        if (tdt == 0)
+        {
+            pos = new Vector3(ta.X, ta.Y, ta.Z);
+            return true;
+        }
+
+        float talpha = (float)(renderTick - ta.ServerTick) / (float)tdt;
+
+        pos = new Vector3(
+            Mathf.LerpUnclamped(ta.X, tb.X, talpha),
+            Mathf.LerpUnclamped(ta.Y, tb.Y, talpha),
+            Mathf.LerpUnclamped(ta.Z, tb.Z, talpha)
+        );
+        return true;
+    }
+
+    // Unsigned wrap-safe time comparisons (good enough for short history windows).
+    private static bool TimeLessOrEqual(uint a, uint b) => unchecked((int)(a - b)) <= 0;
+    private static bool TimeGreaterOrEqual(uint a, uint b) => unchecked((int)(a - b)) >= 0;
 
     private static void Integrate(ref Vector3 pos, float inputX, float inputZ)
     {
@@ -276,56 +380,6 @@ public sealed class UdpClientConnect : MonoBehaviour
             }
 
         list.Insert(0, s);
-    }
-
-    private static bool TryGetInterpolated(
-        List<NetSnapshot> hist,
-        out ulong renderTick,
-        out float x,
-        out float y,
-        out float z)
-    {
-        var latest = hist[^1];
-        renderTick = latest.ServerTick > InterpDelayTicks
-            ? latest.ServerTick - InterpDelayTicks
-            : 0;
-
-        if (renderTick <= hist[0].ServerTick)
-        {
-            x = hist[0].X; y = hist[0].Y; z = hist[0].Z;
-            return true;
-        }
-
-        if (renderTick >= latest.ServerTick)
-        {
-            x = latest.X; y = latest.Y; z = latest.Z;
-            return true;
-        }
-
-        NetSnapshot a = hist[0], b = latest;
-
-        for (int i = 0; i < hist.Count - 1; i++)
-        {
-            var s0 = hist[i];
-            var s1 = hist[i + 1];
-            if (s0.ServerTick <= renderTick && renderTick <= s1.ServerTick)
-            {
-                a = s0; b = s1; break;
-            }
-        }
-
-        ulong dt = b.ServerTick - a.ServerTick;
-        if (dt == 0)
-        {
-            x = a.X; y = a.Y; z = a.Z;
-            return true;
-        }
-
-        float alpha = (float)(renderTick - a.ServerTick) / dt;
-        x = Mathf.LerpUnclamped(a.X, b.X, alpha);
-        y = Mathf.LerpUnclamped(a.Y, b.Y, alpha);
-        z = Mathf.LerpUnclamped(a.Z, b.Z, alpha);
-        return true;
     }
 
     private void OnDestroy()

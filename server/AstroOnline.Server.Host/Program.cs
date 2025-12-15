@@ -205,11 +205,16 @@ internal static class Program
             // Snapshots
             if (tick % snapshotEveryTicks == 0)
             {
+                // Monotonic server time base for interpolation (ms since server start)
+                uint serverTimeMs = unchecked((uint)sw.ElapsedMilliseconds);
+
                 foreach (var c in clients.SnapshotAll())
                 {
                     var player = world.State.GetOrCreatePlayer(c.ClientId);
 
-                    var payload = new byte[32];
+                    // vNext snapshot payload: +4 bytes serverTimeMs
+                    // tick(8) + cid(8) + x,y,z(12) + ack(4) + serverTimeMs(4) = 36
+                    var payload = new byte[36];
 
                     BinaryPrimitives.WriteUInt64LittleEndian(payload.AsSpan(0, 8), (ulong)world.State.Tick);
                     BinaryPrimitives.WriteUInt64LittleEndian(payload.AsSpan(8, 8), c.ClientId);
@@ -219,6 +224,8 @@ internal static class Program
                     BinaryPrimitives.WriteInt32LittleEndian(payload.AsSpan(24, 4), BitConverter.SingleToInt32Bits(player.Z));
 
                     BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(28, 4), player.LastInputSeqAck);
+
+                    BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(32, 4), serverTimeMs);
 
                     var snapshot = PacketBuilder.Build(20, payload);
                     await netServer.SendAsync(c.EndPoint, snapshot, token);

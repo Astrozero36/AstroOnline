@@ -6,7 +6,6 @@ using System.Threading.Tasks;
 
 public sealed class NetClient : IDisposable
 {
-    // Packet types
     private const byte TypePing = 0x01;
     private const byte TypePong = 0x02;
     private const byte TypeConnect = 0x0A;
@@ -43,12 +42,12 @@ public sealed class NetClient : IDisposable
             if (state == ConnectionState.Reconnecting)
             {
                 if (reason == RejectReason.ServerFull)
-                    return "Server full. Retrying…";
-                return "Reconnecting…";
+                    return "Server full. Retryingà";
+                return "Reconnectingà";
             }
 
             if (state == ConnectionState.Connecting)
-                return "Connecting…";
+                return "Connectingà";
 
             if (state == ConnectionState.Connected && IsConnected)
                 return "Connected.";
@@ -334,7 +333,10 @@ public sealed class NetClient : IDisposable
                     continue;
                 }
 
-                if (type == TypeSnapshot && payloadLen == 32)
+                // SNAPSHOT:
+                // v1: payloadLen=32 (no serverTimeMs)
+                // v2: payloadLen=36 (includes serverTimeMs at end)
+                if (type == TypeSnapshot && (payloadLen == 32 || payloadLen == 36))
                 {
                     ulong tick =
                         (ulong)buf[8] |
@@ -366,8 +368,19 @@ public sealed class NetClient : IDisposable
                               (buf[38] << 16) |
                               (buf[39] << 24));
 
+                    uint serverTimeMs = 0;
+                    if (payloadLen == 36)
+                    {
+                        serverTimeMs =
+                            (uint)(buf[40] |
+                                  (buf[41] << 8) |
+                                  (buf[42] << 16) |
+                                  (buf[43] << 24));
+                    }
+
                     _snapshots.Enqueue(new NetSnapshot(
                         tick,
+                        serverTimeMs,
                         cid,
                         BitConverter.Int32BitsToSingle(xi),
                         BitConverter.Int32BitsToSingle(yi),
