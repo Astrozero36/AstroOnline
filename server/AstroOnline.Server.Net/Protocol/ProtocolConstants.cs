@@ -8,4 +8,11 @@ public static class ProtocolConstants
 
     // Protocol version
     public const byte Version = 1;
+
+    // Authoritative simulation constants (server is source of truth)
+    public const int TickRateHz = 20;
+    public const float TickDt = 1f / TickRateHz;
+
+    // Movement
+    public const float MoveSpeed = 6.0f;
 }
