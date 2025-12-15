@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using AstroOnline.Server.Core.Commands;
+using AstroOnline.Server.Net.Protocol;
 
 namespace AstroOnline.Server.Core.World;
 
@@ -9,11 +10,9 @@ public sealed class ServerWorld
 
     public WorldState State { get; } = new();
 
-    // Authoritative movement tuning (MUST match client)
-    private const float MoveSpeed = 6.0f;
-
-    // Fixed tick (matches host & client)
-    private const float TickDt = 1f / 20f;
+    // Authoritative constants (server is source of truth)
+    private const float MoveSpeed = ProtocolConstants.MoveSpeed;
+    private const float TickDt = ProtocolConstants.TickDt;
 
     public void Enqueue(IWorldCommand command)
     {
