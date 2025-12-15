@@ -15,8 +15,8 @@ public sealed class UdpClientConnect : MonoBehaviour
     private const ulong InterpDelayTicks = 3;
 
     // Must match server movement (mirrors server-side ProtocolConstants)
-    private const float MoveSpeed = ProtocolConstants.MoveSpeed;
-    private const float TickDt = ProtocolConstants.TickDt;
+    private static readonly float MoveSpeed = ProtocolConstants.MoveSpeed;
+    private static readonly float TickDt = ProtocolConstants.TickDt;
 
     private readonly Dictionary<ulong, List<NetSnapshot>> _historyByClient = new();
     private readonly Dictionary<ulong, GameObject> _entityByClient = new();
