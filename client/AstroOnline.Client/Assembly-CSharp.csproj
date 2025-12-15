@@ -63,10 +63,15 @@
   <ItemGroup>
     <Compile Include="Assets\Scripts\Net\NetClient.cs" />
     <Compile Include="Assets\Scripts\Net\ConnectionState.cs" />
+    <Compile Include="Assets\Scripts\UI\NetStatusLabel.cs" />
     <Compile Include="Assets\Scripts\Net\UdpClientConnect.cs" />
     <Compile Include="Assets\Scripts\Net\NetSnapshot.cs" />
     <Compile Include="Assets\Scripts\Net\NetClientConfig.cs" />
     <Compile Include="Assets\Scripts\Net\RejectReason.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Assets\Scripts\UI\NetStatusUI.uxml" />
+    <None Include="Assets\Scripts\UI\inlineStyle.uss" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="UnityEngine">

@@ -1,0 +1,18 @@
+#net-status-label {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+
+    padding: 6px 10px;
+
+    font-size: 14px;
+    -unity-font-style: bold;
+
+    color: white;
+    background-color: rgba(0, 0, 0, 0.55);
+
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    border-bottom-left-radius: 6px;
+    border-bottom-right-radius: 6px;
+}

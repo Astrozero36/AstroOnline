@@ -3,6 +3,9 @@ using UnityEngine;
 
 public sealed class UdpClientConnect : MonoBehaviour
 {
+    // v0.043: allow UI to read the active client without reflection
+    public NetClient Client => _client;
+
     private NetClient _client;
 
     // Others: interpolation
