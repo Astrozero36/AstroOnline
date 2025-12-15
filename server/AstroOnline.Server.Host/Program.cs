@@ -98,13 +98,13 @@ internal static class Program
                     continue;
 
                 // Protocol version enforcement
-                if (header.Version != PacketHeader.CurrentVersion)
+                if (header.Version != ProtocolConstants.Version)
                 {
                     if (header.Type == 10 && header.PayloadLength == 0)
                     {
                         var rejectPayload = new byte[3];
                         rejectPayload[0] = (byte)RejectReason.ProtocolVersionMismatch;
-                        rejectPayload[1] = PacketHeader.CurrentVersion;
+                        rejectPayload[1] = ProtocolConstants.Version;
                         rejectPayload[2] = header.Version;
 
                         var reject = PacketBuilder.Build(12, rejectPayload);
@@ -127,8 +127,8 @@ internal static class Program
                         // REJECT: ServerFull
                         var rejectPayload = new byte[3];
                         rejectPayload[0] = (byte)RejectReason.ServerFull;
-                        rejectPayload[1] = PacketHeader.CurrentVersion;
-                        rejectPayload[2] = PacketHeader.CurrentVersion;
+                        rejectPayload[1] = ProtocolConstants.Version;
+                        rejectPayload[2] = ProtocolConstants.Version;
 
                         var reject = PacketBuilder.Build(12, rejectPayload);
                         await netServer.SendAsync(datagram.RemoteEndPoint, reject, token);

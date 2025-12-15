@@ -6,19 +6,20 @@ public static class PacketBuilder
 {
     public static byte[] Build(byte type, ReadOnlySpan<byte> payload)
     {
-        var totalLen = PacketHeader.SizeBytes + payload.Length;
-        var buf = new byte[totalLen];
+        var buffer = new byte[PacketHeader.SizeBytes + payload.Length];
 
-        buf[0] = PacketHeader.Magic0;
-        buf[1] = PacketHeader.Magic1;
-        buf[2] = PacketHeader.CurrentVersion;
-        buf[3] = type;
+        buffer[0] = ProtocolConstants.Magic0;
+        buffer[1] = ProtocolConstants.Magic1;
+        buffer[2] = ProtocolConstants.Version;
+        buffer[3] = type;
 
-        BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(4, 4), (uint)payload.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            buffer.AsSpan(4, 4),
+            (uint)payload.Length
+        );
 
-        if (payload.Length > 0)
-            payload.CopyTo(buf.AsSpan(PacketHeader.SizeBytes));
+        payload.CopyTo(buffer.AsSpan(PacketHeader.SizeBytes));
 
-        return buf;
+        return buffer;
     }
 }

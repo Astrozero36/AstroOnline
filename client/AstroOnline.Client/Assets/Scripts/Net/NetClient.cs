@@ -6,12 +6,6 @@ using System.Threading.Tasks;
 
 public sealed class NetClient : IDisposable
 {
-    private const byte Magic0 = 0xA0;
-    private const byte Magic1 = 0x01;
-
-    // v0.042: restore production protocol version (mismatch tests should be temporary edits only)
-    private const byte CurrentVersion = 0x01;
-
     // Packet types
     private const byte TypePing = 0x01;
     private const byte TypePong = 0x02;
@@ -27,26 +21,23 @@ public sealed class NetClient : IDisposable
 
     public ConnectionState State { get; private set; } = ConnectionState.Stopped;
 
-    // Last reject info (valid after a REJECT)
     public RejectReason LastRejectReason { get; private set; } = RejectReason.Unknown;
     public byte LastRejectExpectedVersion { get; private set; }
     public byte LastRejectGotVersion { get; private set; }
 
-    // v0.042: centralized UI/presentation status
     public bool IsTerminal => State == ConnectionState.UpdateRequired;
 
     public string StatusText
     {
         get
         {
-            // Snapshot local copies (avoid partial reads across threads)
             var state = State;
-            var isConnected = IsConnected;
             var reason = LastRejectReason;
             byte exp = LastRejectExpectedVersion;
             byte got = LastRejectGotVersion;
 
-            if (state == ConnectionState.UpdateRequired || reason == RejectReason.ProtocolVersionMismatch)
+            if (state == ConnectionState.UpdateRequired ||
+                reason == RejectReason.ProtocolVersionMismatch)
                 return $"Client out of date (expected={exp}, got={got}). Update required.";
 
             if (state == ConnectionState.Reconnecting)
@@ -59,7 +50,7 @@ public sealed class NetClient : IDisposable
             if (state == ConnectionState.Connecting)
                 return "Connecting…";
 
-            if (state == ConnectionState.Connected && isConnected)
+            if (state == ConnectionState.Connected && IsConnected)
                 return "Connected.";
 
             if (state == ConnectionState.Stopped)
@@ -69,7 +60,6 @@ public sealed class NetClient : IDisposable
         }
     }
 
-    // Raised from background threads. In Unity, consume via polling or marshal to main thread yourself.
     public event Action<ConnectionState>? OnStateChanged;
     public event Action<RejectReason, byte, byte>? OnRejected;
 
@@ -80,11 +70,8 @@ public sealed class NetClient : IDisposable
     private readonly ConcurrentQueue<NetSnapshot> _snapshots = new();
 
     private int _forceReconnectRequested;
-
-    // Terminal stop (e.g. protocol mismatch). When set, the client will not attempt reconnects.
     private int _terminalStopRequested;
 
-    // Reconnect backoff
     private int _retryCount;
     private const int MaxRetryDelayMs = 30_000;
     private const int InitialRetryDelayMs = 1_000;
@@ -101,7 +88,6 @@ public sealed class NetClient : IDisposable
             throw new InvalidOperationException("NetClient already started.");
 
         _cts = new CancellationTokenSource();
-
         SetState(ConnectionState.Connecting);
 
         Task.Run(() => ReceiveLoopAsync(_cts.Token));
@@ -120,7 +106,7 @@ public sealed class NetClient : IDisposable
         int zi = BitConverter.SingleToInt32Bits(inputZ);
 
         byte[] pkt = new byte[20];
-        WriteHeader(pkt, CurrentVersion, TypeInput, 12);
+        WriteHeader(pkt, TypeInput, 12);
 
         pkt[8] = (byte)(seq & 0xFF);
         pkt[9] = (byte)((seq >> 8) & 0xFF);
@@ -146,7 +132,6 @@ public sealed class NetClient : IDisposable
         {
             while (!token.IsCancellationRequested)
             {
-                // Terminal state: do not attempt any further reconnects or pings.
                 if (Volatile.Read(ref _terminalStopRequested) != 0)
                 {
                     IsConnected = false;
@@ -156,7 +141,6 @@ public sealed class NetClient : IDisposable
                     continue;
                 }
 
-                // If connected and we got a forced reconnect request, drop state and re-enter connect loop.
                 if (IsConnected && Interlocked.Exchange(ref _forceReconnectRequested, 0) != 0)
                 {
                     IsConnected = false;
@@ -164,7 +148,6 @@ public sealed class NetClient : IDisposable
                     SetState(ConnectionState.Reconnecting);
                 }
 
-                // Connect loop
                 while (!token.IsCancellationRequested && !IsConnected)
                 {
                     if (Volatile.Read(ref _terminalStopRequested) != 0)
@@ -179,7 +162,7 @@ public sealed class NetClient : IDisposable
                     await Task.Delay(delayMs, token);
 
                     byte[] connect = new byte[8];
-                    WriteHeader(connect, CurrentVersion, TypeConnect, 0);
+                    WriteHeader(connect, TypeConnect, 0);
 
                     await _udp.SendAsync(connect, connect.Length, _config.ServerIp, _config.ServerPort);
 
@@ -202,14 +185,12 @@ public sealed class NetClient : IDisposable
                     _retryCount++;
                 }
 
-                // Reset backoff on success
                 if (IsConnected)
                 {
                     _retryCount = 0;
                     SetState(ConnectionState.Connected);
                 }
 
-                // Connected loop
                 while (!token.IsCancellationRequested && IsConnected)
                 {
                     if (Volatile.Read(ref _terminalStopRequested) != 0)
@@ -233,9 +214,7 @@ public sealed class NetClient : IDisposable
                 }
             }
         }
-        catch (OperationCanceledException) { }
-        catch (ObjectDisposedException) { }
-        catch (SocketException) { }
+        catch { }
         finally
         {
             IsConnected = false;
@@ -246,7 +225,7 @@ public sealed class NetClient : IDisposable
 
     private int CalculateBackoffDelayMs()
     {
-        int exp = Math.Min(_retryCount, 5); // 1s,2s,4s,8s,16s,32s cap then hard-cap below
+        int exp = Math.Min(_retryCount, 5);
         int delay = InitialRetryDelayMs * (1 << exp);
         return Math.Min(delay, MaxRetryDelayMs);
     }
@@ -256,7 +235,7 @@ public sealed class NetClient : IDisposable
         uint sendMs = (uint)Environment.TickCount;
 
         byte[] ping = new byte[12];
-        WriteHeader(ping, CurrentVersion, TypePing, 4);
+        WriteHeader(ping, TypePing, 4);
 
         ping[8] = (byte)(sendMs & 0xFF);
         ping[9] = (byte)((sendMs >> 8) & 0xFF);
@@ -278,18 +257,21 @@ public sealed class NetClient : IDisposable
                 if (buf.Length < 8)
                     continue;
 
-                if (buf[0] != Magic0 || buf[1] != Magic1)
+                if (buf[0] != ProtocolConstants.Magic0 ||
+                    buf[1] != ProtocolConstants.Magic1)
                     continue;
 
                 byte version = buf[2];
                 byte type = buf[3];
-                uint payloadLen = (uint)(buf[4] | (buf[5] << 8) | (buf[6] << 16) | (buf[7] << 24));
+                uint payloadLen =
+                    (uint)(buf[4] |
+                          (buf[5] << 8) |
+                          (buf[6] << 16) |
+                          (buf[7] << 24));
 
                 if (buf.Length != 8 + payloadLen)
                     continue;
 
-                // REJECT (12) payloadLen=3: reason(u8), expectedVersion(u8), gotVersion(u8)
-                // Process regardless of header.version so we can recover from mismatches.
                 if (type == TypeReject && payloadLen == 3)
                 {
                     var reason = (RejectReason)buf[8];
@@ -305,7 +287,6 @@ public sealed class NetClient : IDisposable
                     IsConnected = false;
                     ClientId = 0;
 
-                    // Protocol mismatch is terminal: stop reconnect attempts and enter UpdateRequired.
                     if (reason == RejectReason.ProtocolVersionMismatch)
                     {
                         Interlocked.Exchange(ref _terminalStopRequested, 1);
@@ -314,18 +295,15 @@ public sealed class NetClient : IDisposable
                     }
                     else
                     {
-                        // ServerFull (and any other rejects for now) remain recoverable.
                         Interlocked.Exchange(ref _forceReconnectRequested, 1);
                         SetState(ConnectionState.Reconnecting);
                     }
                     continue;
                 }
 
-                // For all other packets, enforce that they match our current protocol.
-                if (version != CurrentVersion)
+                if (version != ProtocolConstants.Version)
                     continue;
 
-                // ACCEPT (11) payloadLen=8
                 if (type == TypeAccept && payloadLen == 8)
                 {
                     ClientId =
@@ -344,16 +322,18 @@ public sealed class NetClient : IDisposable
                     continue;
                 }
 
-                // PONG (2) payloadLen=4
                 if (type == TypePong && payloadLen == 4)
                 {
-                    uint echoMs = (uint)(buf[8] | (buf[9] << 8) | (buf[10] << 16) | (buf[11] << 24));
+                    uint echoMs =
+                        (uint)(buf[8] |
+                              (buf[9] << 8) |
+                              (buf[10] << 16) |
+                              (buf[11] << 24));
                     uint nowMs = (uint)Environment.TickCount;
                     LastRttMs = unchecked((int)(nowMs - echoMs));
                     continue;
                 }
 
-                // SNAPSHOT (20) payloadLen=32
                 if (type == TypeSnapshot && payloadLen == 32)
                 {
                     ulong tick =
@@ -382,11 +362,10 @@ public sealed class NetClient : IDisposable
 
                     uint ack =
                         (uint)(buf[36] |
-                        (buf[37] << 8) |
-                        (buf[38] << 16) |
-                        (buf[39] << 24));
+                              (buf[37] << 8) |
+                              (buf[38] << 16) |
+                              (buf[39] << 24));
 
-                    // v0.042: fix Z being incorrectly set to Y
                     _snapshots.Enqueue(new NetSnapshot(
                         tick,
                         cid,
@@ -398,8 +377,7 @@ public sealed class NetClient : IDisposable
                 }
             }
         }
-        catch (OperationCanceledException) { }
-        catch (SocketException) { }
+        catch { }
         finally
         {
             IsConnected = false;
@@ -416,11 +394,11 @@ public sealed class NetClient : IDisposable
         OnStateChanged?.Invoke(state);
     }
 
-    private static void WriteHeader(byte[] packet, byte version, byte type, uint payloadLen)
+    private static void WriteHeader(byte[] packet, byte type, uint payloadLen)
     {
-        packet[0] = Magic0;
-        packet[1] = Magic1;
-        packet[2] = version;
+        packet[0] = ProtocolConstants.Magic0;
+        packet[1] = ProtocolConstants.Magic1;
+        packet[2] = ProtocolConstants.Version;
         packet[3] = type;
 
         packet[4] = (byte)(payloadLen & 0xFF);
