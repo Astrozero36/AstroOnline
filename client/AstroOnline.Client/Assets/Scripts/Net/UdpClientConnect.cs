@@ -3,25 +3,23 @@ using UnityEngine;
 
 public sealed class UdpClientConnect : MonoBehaviour
 {
-    // v0.043: allow UI to read the active client without reflection
     public NetClient Client => _client;
 
-    // Step 45.1b: last computed interpolation error (avg, units) for non-local entities
     public float LastInterpAvgError { get; private set; }
 
     private NetClient _client;
 
-    // Others: interpolation
     private const ulong InterpDelayTicks = 3;
 
-    // Must match server movement (mirrors server-side ProtocolConstants)
     private static readonly float MoveSpeed = ProtocolConstants.MoveSpeed;
     private static readonly float TickDt = ProtocolConstants.TickDt;
+
+    // Reconciliation tolerance (units). Below this, do not rebuild prediction.
+    private const float ReconcileEpsilon = 0.02f;
 
     private readonly Dictionary<ulong, List<NetSnapshot>> _historyByClient = new();
     private readonly Dictionary<ulong, GameObject> _entityByClient = new();
 
-    // Prediction
     private uint _localSeq;
     private uint _lastAckSeq;
     private bool _hasAckBase;
@@ -33,11 +31,9 @@ public sealed class UdpClientConnect : MonoBehaviour
 
     private float _accum;
 
-    // Step 41: terminal stop for non-recoverable rejects (protocol mismatch)
     private bool _terminalStop;
     private string _terminalStopMessage;
 
-    // Step 45.1b: interpolation error instrumentation (no logging)
     private float _interpErrorAccum;
     private int _interpErrorSamples;
     private float _nextInterpSampleTime;
@@ -52,11 +48,8 @@ public sealed class UdpClientConnect : MonoBehaviour
         };
 
         _client = new NetClient(config);
-
-        // Subscribe so rejects/state are visible in Unity console.
         _client.OnStateChanged += OnNetStateChanged;
         _client.OnRejected += OnNetRejected;
-
         _client.Start();
 
         _nextInterpSampleTime = Time.time + 1f;
@@ -65,52 +58,32 @@ public sealed class UdpClientConnect : MonoBehaviour
 
     private void OnNetStateChanged(ConnectionState state)
     {
-        Debug.Log($"NET STATE: {state}");
-
-        // Step 41: if NetClient entered terminal state, stop status spam and surface a clear message once
-        if (state == ConnectionState.UpdateRequired)
+        if (state == ConnectionState.UpdateRequired && !_terminalStop)
         {
-            if (!_terminalStop)
-            {
-                _terminalStop = true;
-
-                if (string.IsNullOrEmpty(_terminalStopMessage))
-                    _terminalStopMessage = "Client out of date. Update required.";
-
-                Debug.LogError(_terminalStopMessage);
-            }
+            _terminalStop = true;
+            _terminalStopMessage ??= "Client out of date. Update required.";
+            Debug.LogError(_terminalStopMessage);
         }
     }
 
     private void OnNetRejected(RejectReason reason, byte expected, byte got)
     {
-        Debug.LogWarning($"NET REJECT: reason={reason} expectedVersion={expected} gotVersion={got}");
-
-        // Step 41: Protocol mismatch is terminal (must not reconnect)
-        if (reason == RejectReason.ProtocolVersionMismatch)
+        if (reason == RejectReason.ProtocolVersionMismatch && !_terminalStop)
         {
-            if (!_terminalStop)
-            {
-                _terminalStop = true;
-                _terminalStopMessage = $"Client out of date (expectedVersion={expected}, gotVersion={got}). Update required.";
-                Debug.LogError(_terminalStopMessage);
-            }
+            _terminalStop = true;
+            _terminalStopMessage =
+                $"Client out of date (expectedVersion={expected}, gotVersion={got}). Update required.";
+            Debug.LogError(_terminalStopMessage);
         }
     }
 
     private void Update()
     {
-        if (_client == null)
+        if (_client == null || _terminalStop)
             return;
 
-        // Step 41: stop gameplay updates once terminal
-        if (_terminalStop)
-            return;
-
-        // Drain snapshots
         while (_client.TryDequeueSnapshot(out var s))
         {
-            // history for non-local interpolation
             if (!_historyByClient.TryGetValue(s.ClientId, out var list))
             {
                 list = new List<NetSnapshot>(32);
@@ -121,27 +94,30 @@ public sealed class UdpClientConnect : MonoBehaviour
             if (list.Count > 64)
                 list.RemoveRange(0, list.Count - 64);
 
-            // local reconciliation base from acked seq
             if (_client.IsConnected && _client.ClientId != 0 && s.ClientId == _client.ClientId)
             {
-                _authoritativeBasePos = new Vector3(s.X, s.Y, s.Z);
-
+                var serverPos = new Vector3(s.X, s.Y, s.Z);
                 uint newAck = s.LastInputSeqAck;
+
                 if (!_hasAckBase)
                 {
                     _hasAckBase = true;
                     _lastAckSeq = newAck;
-                    _predictedPos = _authoritativeBasePos;
+                    _authoritativeBasePos = serverPos;
+                    _predictedPos = serverPos;
                     _inputBySeq.Clear();
-                    _localSeq = newAck; // start seq from server-acked baseline
+                    _localSeq = newAck;
                     _accum = 0f;
                 }
                 else if (newAck > _lastAckSeq)
                 {
                     _lastAckSeq = newAck;
 
-                    // Rebuild predicted from authoritative + replay inputs AFTER ack
-                    ReplayFromAck();
+                    float err = Vector3.Distance(_predictedPos, serverPos);
+                    _authoritativeBasePos = serverPos;
+
+                    if (err > ReconcileEpsilon)
+                        ReplayFromAck();
                 }
             }
         }
@@ -153,7 +129,6 @@ public sealed class UdpClientConnect : MonoBehaviour
             return;
         }
 
-        // Sample input on main thread
         float inputX = 0f;
         float inputZ = 0f;
         if (Input.GetKey(KeyCode.A)) inputX -= 1f;
@@ -161,28 +136,19 @@ public sealed class UdpClientConnect : MonoBehaviour
         if (Input.GetKey(KeyCode.W)) inputZ += 1f;
         if (Input.GetKey(KeyCode.S)) inputZ -= 1f;
 
-        // Step local prediction at 20 Hz and send matching seq
         _accum += Time.unscaledDeltaTime;
 
         while (_accum >= TickDt)
         {
             _accum -= TickDt;
-
             _localSeq++;
 
             _inputBySeq[_localSeq] = new InputSample(inputX, inputZ);
-
-            // Predict locally
             Integrate(ref _predictedPos, inputX, inputZ);
-
-            // Send the EXACT SAME seq/input to server
             _client.SendInput(_localSeq, inputX, inputZ);
         }
 
-        // Render: local predicted, others interpolated
         RenderAll();
-
-        // Step 45.1b: compute metric once per second
         SampleInterpMetricOncePerSecond();
     }
 
@@ -192,11 +158,9 @@ public sealed class UdpClientConnect : MonoBehaviour
             return;
 
         _nextInterpSampleTime = Time.time + 1f;
-
-        if (_interpErrorSamples > 0)
-            LastInterpAvgError = _interpErrorAccum / _interpErrorSamples;
-        else
-            LastInterpAvgError = 0f;
+        LastInterpAvgError = _interpErrorSamples > 0
+            ? _interpErrorAccum / _interpErrorSamples
+            : 0f;
 
         _interpErrorAccum = 0f;
         _interpErrorSamples = 0;
@@ -206,7 +170,6 @@ public sealed class UdpClientConnect : MonoBehaviour
     {
         _predictedPos = _authoritativeBasePos;
 
-        // Replay inputs from (ack+1 .. localSeq)
         for (uint seq = _lastAckSeq + 1; seq <= _localSeq; seq++)
         {
             if (_inputBySeq.TryGetValue(seq, out var inp))
@@ -215,13 +178,10 @@ public sealed class UdpClientConnect : MonoBehaviour
                 Integrate(ref _predictedPos, 0f, 0f);
         }
 
-        // Drop old inputs <= ack
         var toRemove = new List<uint>();
         foreach (var k in _inputBySeq.Keys)
-        {
-            if (k <= _lastAckSeq)
-                toRemove.Add(k);
-        }
+            if (k <= _lastAckSeq) toRemove.Add(k);
+
         for (int i = 0; i < toRemove.Count; i++)
             _inputBySeq.Remove(toRemove[i]);
     }
@@ -248,24 +208,19 @@ public sealed class UdpClientConnect : MonoBehaviour
 
                 pos = new Vector3(x, y, z);
 
-                // Step 45.1b: measure interpolation drift vs latest snapshot (metric only)
                 var last = hist[hist.Count - 1];
-                var snapPos = new Vector3(last.X, last.Y, last.Z);
-                float err = Vector3.Distance(snapPos, pos);
+                float err = Vector3.Distance(
+                    new Vector3(last.X, last.Y, last.Z), pos);
                 _interpErrorAccum += err;
                 _interpErrorSamples++;
             }
 
-            var go = GetOrCreateEntity(cid);
-            go.transform.position = pos;
+            GetOrCreateEntity(cid).transform.position = pos;
         }
     }
 
     private void RenderFromInterpolationOnly()
     {
-        if (_historyByClient.Count == 0)
-            return;
-
         foreach (var kv in _historyByClient)
         {
             var hist = kv.Value;
@@ -275,8 +230,8 @@ public sealed class UdpClientConnect : MonoBehaviour
             if (!TryGetInterpolated(hist, out _, out var x, out var y, out var z))
                 continue;
 
-            var go = GetOrCreateEntity(kv.Key);
-            go.transform.position = new Vector3(x, y, z);
+            GetOrCreateEntity(kv.Key).transform.position =
+                new Vector3(x, y, z);
         }
     }
 
@@ -301,39 +256,39 @@ public sealed class UdpClientConnect : MonoBehaviour
 
         go = GameObject.CreatePrimitive(PrimitiveType.Capsule);
         go.name = $"NetEntity_{clientId}";
-        go.transform.position = Vector3.zero;
-
-        if (_client != null && _client.IsConnected && clientId == _client.ClientId)
-            go.transform.localScale = new Vector3(1.1f, 1.1f, 1.1f);
-
         _entityByClient[clientId] = go;
         return go;
     }
 
     private static void InsertSortedByTick(List<NetSnapshot> list, NetSnapshot s)
     {
-        if (list.Count == 0 || s.ServerTick >= list[list.Count - 1].ServerTick)
+        if (list.Count == 0 || s.ServerTick >= list[^1].ServerTick)
         {
             list.Add(s);
             return;
         }
 
         for (int i = list.Count - 1; i >= 0; i--)
-        {
             if (s.ServerTick >= list[i].ServerTick)
             {
                 list.Insert(i + 1, s);
                 return;
             }
-        }
 
         list.Insert(0, s);
     }
 
-    private static bool TryGetInterpolated(List<NetSnapshot> hist, out ulong renderTick, out float x, out float y, out float z)
+    private static bool TryGetInterpolated(
+        List<NetSnapshot> hist,
+        out ulong renderTick,
+        out float x,
+        out float y,
+        out float z)
     {
-        var latest = hist[hist.Count - 1];
-        renderTick = latest.ServerTick > InterpDelayTicks ? (latest.ServerTick - InterpDelayTicks) : 0;
+        var latest = hist[^1];
+        renderTick = latest.ServerTick > InterpDelayTicks
+            ? latest.ServerTick - InterpDelayTicks
+            : 0;
 
         if (renderTick <= hist[0].ServerTick)
         {
@@ -347,8 +302,7 @@ public sealed class UdpClientConnect : MonoBehaviour
             return true;
         }
 
-        NetSnapshot a = hist[0];
-        NetSnapshot b = latest;
+        NetSnapshot a = hist[0], b = latest;
 
         for (int i = 0; i < hist.Count - 1; i++)
         {
@@ -356,9 +310,7 @@ public sealed class UdpClientConnect : MonoBehaviour
             var s1 = hist[i + 1];
             if (s0.ServerTick <= renderTick && renderTick <= s1.ServerTick)
             {
-                a = s0;
-                b = s1;
-                break;
+                a = s0; b = s1; break;
             }
         }
 
@@ -369,8 +321,7 @@ public sealed class UdpClientConnect : MonoBehaviour
             return true;
         }
 
-        float alpha = (float)(renderTick - a.ServerTick) / (float)dt;
-
+        float alpha = (float)(renderTick - a.ServerTick) / dt;
         x = Mathf.LerpUnclamped(a.X, b.X, alpha);
         y = Mathf.LerpUnclamped(a.Y, b.Y, alpha);
         z = Mathf.LerpUnclamped(a.Z, b.Z, alpha);
@@ -379,33 +330,13 @@ public sealed class UdpClientConnect : MonoBehaviour
 
     private void OnDestroy()
     {
-        if (_client != null)
-        {
-            _client.OnStateChanged -= OnNetStateChanged;
-            _client.OnRejected -= OnNetRejected;
-            _client.Dispose();
-        }
-
-        foreach (var kv in _entityByClient)
-        {
-            if (kv.Value != null)
-                Destroy(kv.Value);
-        }
-
-        _entityByClient.Clear();
-        _historyByClient.Clear();
-        _inputBySeq.Clear();
+        _client?.Dispose();
     }
 
     private readonly struct InputSample
     {
         public readonly float X;
         public readonly float Z;
-
-        public InputSample(float x, float z)
-        {
-            X = x;
-            Z = z;
-        }
+        public InputSample(float x, float z) { X = x; Z = z; }
     }
 }
