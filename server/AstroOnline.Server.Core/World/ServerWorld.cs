@@ -9,10 +9,10 @@ public sealed class ServerWorld
 
     public WorldState State { get; } = new();
 
-    // Authoritative movement tuning (units per second)
-    private const float MoveSpeed = 2.0f;
+    // Authoritative movement tuning (MUST match client)
+    private const float MoveSpeed = 6.0f;
 
-    // Fixed tick (matches host)
+    // Fixed tick (matches host & client)
     private const float TickDt = 1f / 20f;
 
     public void Enqueue(IWorldCommand command)
@@ -30,16 +30,15 @@ public sealed class ServerWorld
             cmd.Apply(State);
         }
 
-        // Authoritative simulation step: integrate movement using current input state
+        // Authoritative simulation step
         foreach (var kv in State.Players)
         {
             var p = kv.Value;
 
-            // Input vector is expected to be stored on PlayerState (added next step)
             float ix = p.InputX;
             float iz = p.InputZ;
 
-            // Clamp to unit circle (prevents faster diagonal)
+            // Clamp to unit circle
             float magSq = (ix * ix) + (iz * iz);
             if (magSq > 1f)
             {
@@ -50,7 +49,6 @@ public sealed class ServerWorld
 
             p.X += ix * MoveSpeed * TickDt;
             p.Z += iz * MoveSpeed * TickDt;
-            // p.Y stays unchanged for now
         }
     }
 }
