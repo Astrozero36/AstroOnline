@@ -6,13 +6,16 @@ public sealed class UdpClientConnect : MonoBehaviour
     // v0.043: allow UI to read the active client without reflection
     public NetClient Client => _client;
 
+    // Step 45.1b: last computed interpolation error (avg, units) for non-local entities
+    public float LastInterpAvgError { get; private set; }
+
     private NetClient _client;
 
     // Others: interpolation
     private const ulong InterpDelayTicks = 3;
 
     // Must match server movement
-    private const float MoveSpeed = 2.5f;
+    private const float MoveSpeed = 6.0f;
     private const float TickDt = 1f / 20f;
 
     private readonly Dictionary<ulong, List<NetSnapshot>> _historyByClient = new();
@@ -29,11 +32,15 @@ public sealed class UdpClientConnect : MonoBehaviour
     private readonly Dictionary<uint, InputSample> _inputBySeq = new();
 
     private float _accum;
-    private float _nextStatusLogTime;
 
     // Step 41: terminal stop for non-recoverable rejects (protocol mismatch)
     private bool _terminalStop;
     private string _terminalStopMessage;
+
+    // Step 45.1b: interpolation error instrumentation (no logging)
+    private float _interpErrorAccum;
+    private int _interpErrorSamples;
+    private float _nextInterpSampleTime;
 
     private void Start()
     {
@@ -52,7 +59,8 @@ public sealed class UdpClientConnect : MonoBehaviour
 
         _client.Start();
 
-        _nextStatusLogTime = Time.time + 1f;
+        _nextInterpSampleTime = Time.time + 1f;
+        LastInterpAvgError = 0f;
     }
 
     private void OnNetStateChanged(ConnectionState state)
@@ -95,15 +103,9 @@ public sealed class UdpClientConnect : MonoBehaviour
         if (_client == null)
             return;
 
-        // Step 41: stop spammy status logs and gameplay updates once terminal
+        // Step 41: stop gameplay updates once terminal
         if (_terminalStop)
             return;
-
-        if (Time.time >= _nextStatusLogTime)
-        {
-            _nextStatusLogTime = Time.time + 1f;
-            Debug.Log($"Net status: state={_client.State} connected={_client.IsConnected} clientId={_client.ClientId} rtt={_client.LastRttMs}ms seq={_localSeq} ack={_lastAckSeq}");
-        }
 
         // Drain snapshots
         while (_client.TryDequeueSnapshot(out var s))
@@ -147,6 +149,7 @@ public sealed class UdpClientConnect : MonoBehaviour
         if (!_client.IsConnected || !_hasAckBase || _client.ClientId == 0)
         {
             RenderFromInterpolationOnly();
+            SampleInterpMetricOncePerSecond();
             return;
         }
 
@@ -178,6 +181,25 @@ public sealed class UdpClientConnect : MonoBehaviour
 
         // Render: local predicted, others interpolated
         RenderAll();
+
+        // Step 45.1b: compute metric once per second
+        SampleInterpMetricOncePerSecond();
+    }
+
+    private void SampleInterpMetricOncePerSecond()
+    {
+        if (Time.time < _nextInterpSampleTime)
+            return;
+
+        _nextInterpSampleTime = Time.time + 1f;
+
+        if (_interpErrorSamples > 0)
+            LastInterpAvgError = _interpErrorAccum / _interpErrorSamples;
+        else
+            LastInterpAvgError = 0f;
+
+        _interpErrorAccum = 0f;
+        _interpErrorSamples = 0;
     }
 
     private void ReplayFromAck()
@@ -225,6 +247,13 @@ public sealed class UdpClientConnect : MonoBehaviour
                     continue;
 
                 pos = new Vector3(x, y, z);
+
+                // Step 45.1b: measure interpolation drift vs latest snapshot (metric only)
+                var last = hist[hist.Count - 1];
+                var snapPos = new Vector3(last.X, last.Y, last.Z);
+                float err = Vector3.Distance(snapPos, pos);
+                _interpErrorAccum += err;
+                _interpErrorSamples++;
             }
 
             var go = GetOrCreateEntity(cid);

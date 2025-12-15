@@ -48,6 +48,11 @@ public sealed class NetStatusLabel : MonoBehaviour
         }
 
         string text = _client.StatusText;
+
+        // Step 45.1c: show interpolation error metric (no Console logging)
+        if (_client.IsConnected && !_client.IsTerminal)
+            text += $"  interpErr={_driver.LastInterpAvgError:F3}";
+
         if (text == _lastText)
             return;
 
